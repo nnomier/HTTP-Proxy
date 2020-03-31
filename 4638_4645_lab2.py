@@ -3,6 +3,8 @@ import sys
 import os
 import enum
 import socket
+from _thread import *
+import threading
 
 class HttpRequestInfo(object):
 
@@ -110,8 +112,8 @@ def receive_data(conn):
         if data == "\r\n" and last_received == "\r\n": break
         last_received = data
         if not data: break
-        print("received data:", data)
-        # conn.send(data)
+        # print("received data:", data)
+    print("REQUEST RECEIVED FROM CLIENT: ",buffer,"\n")
     return buffer
 
 
@@ -124,34 +126,48 @@ def setup_sockets(proxy_port_number):
     print("Starting HTTP proxy on port:", proxy_port_number)
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(("127.0.0.1", int(proxy_port_number)))
-    s.listen(20)
+    s.listen(30)
     # conn, client_addr = s.accept()
     do_socket_logic(s,proxy_port_number)
-   
+    
     return None
+
+def threaded(s,client_cache,proxy_port_number):
+    conn, client_addr = s.accept()
+    print("Connecting client with address: ",client_addr)
+    buffer=receive_data(conn)
+    response_msg = http_request_pipeline(('127.0.0.1', proxy_port_number), buffer) 
+    isError = isinstance(response_msg, HttpErrorResponse)
+    if isError==True:
+        error_message = response_msg.construct_message()
+        conn.sendall(error_message)
+    else:
+        send_data_to_client(client_cache,response_msg,conn)
+    print("Response sent to client with address: ",client_addr)
+    conn.close()
+    # lock.release()
+
 
 
 def do_socket_logic(s,proxy_port_number):
+    # lock = threading.Lock() 
     client_cache = {}
+    threads=[]
+    for i in range(0,30):
+        thread=threading.Thread(target=threaded,args=(s,client_cache,proxy_port_number)) #arguments
+        threads.append(thread)
+        thread.start()
 
-    while 1:
-        conn, client_addr = s.accept()
-        buffer=receive_data(conn)
-        response_msg = http_request_pipeline(('127.0.0.1', proxy_port_number), buffer) 
-        isError = isinstance(response_msg, HttpErrorResponse)
-        if isError==True:
-            error_message = response_msg.construct_message()
-            conn.sendall(error_message)
-        else:
-            send_data_to_client(client_cache,response_msg,conn)
-        conn.close()
-
-
+    for thread in threads:  
+        thread.join() 
+        
+    s.close()
 
 def send_data_to_client(client_cache,response_msg,conn):
     url=response_msg.requested_host+response_msg.requested_path
     if url in client_cache:
-        print("I FOUND DATA IN CACHE, NO NEED TO CONNECT THE SERVER")
+        print("**FOUND DATA IN CACHE, NO NEED TO CONNECT THE SERVER**")
+        print("Data received from server :\n",client_cache[url].decode("UTF-8"))
         conn.sendall(client_cache[url])   
     else:
         correct_message = response_msg.construct_message()
@@ -161,7 +177,7 @@ def send_data_to_client(client_cache,response_msg,conn):
         # conn.sendto(correct_message,(response_msg.requested_host, response_msg.requested_port))
         data=receive_html(s_from_proxy_to_server)
         client_cache[response_msg.requested_host+response_msg.requested_path]=data
-        print("data _ decoded",data.decode('UTF-8'))
+        print("Data received from server :\n",data.decode('UTF-8'))
         conn.sendall(data)
 
 def receive_html(s_from_proxy_to_server):
@@ -171,7 +187,6 @@ def receive_html(s_from_proxy_to_server):
         if len(data_from_server_to_proxy)<=0:
             break 
         data+=data_from_server_to_proxy
-    print("LENGTH OF DATA",len(data))
     return data
 
 
@@ -233,7 +248,6 @@ def parse_http_request(source_addr, http_raw_data):
 
     request_obj = HttpRequestInfo(source_addr,method, requested_host, port, requested_path,headers)
     sanitize_http_request(request_obj)
-    print("REQUEST",request_obj.headers)
     return request_obj
 
 def parse_url(url):
@@ -249,7 +263,6 @@ def parse_url(url):
         splitted = url.split("/",1)
         host=splitted[0]
 
-    print("splitted",splitted,len(splitted))
     if len(splitted)==index:
         requested_path = "/"
     else:
@@ -259,14 +272,11 @@ def parse_url(url):
 
 def check_port(url):
     port=80
-    print("HIIII,",url)
     port_split=url.split(':')
-    print("len of split",len(port_split))
     if len(port_split)==3: #check if http://blahblah:800
         port=int(port_split[2])
         url=port_split[0]+':'+port_split[1]
     elif len(port_split)==2:
-        print("split_port",port_split)
         port=int(port_split[1])
         url=port_split[0]
         
@@ -279,11 +289,10 @@ def check_http_request_validity(http_raw_data) -> HttpRequestState:
     data_lines = http_raw_data.split("\r\n")
     first_line = data_lines[0].split()
     http_version='HTTP/1.0'
-    if len(first_line)!= 3 and http_version not in first_line:
+    if len(first_line)!= 3 or http_version not in first_line:
         return HttpRequestState.INVALID_INPUT
 
     method=first_line[0]
-    print("method",method)
     url=first_line[1]
    
     # 0 for absolute and 1 for relative 
